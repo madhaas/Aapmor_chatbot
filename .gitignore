@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.env
+.env
+
+# Virtual env
+venv/
+env/
+
+# Uploads and models
+/data/uploads/*
+!/data/uploads/.gitkeep
+/models/*
+
+# IDEs
+.vscode/
+.idea/

@@ -1,0 +1,159 @@
+RAD_PROJ
+--------------------------------------------------------------
+ Full Project Roadmap With Learning Flow
+Phase 1: Requirements + Setup
+
+Goals to learn:
+
+    What is RAG? → Intuition + architecture
+
+    Why hybrid search? → BM25 + dense vectors
+
+    Why Docker + Compose? → Portable multi-service setup
+
+Tasks:
+
+    Install all tools (fastapi, qdrant-client, elasticsearch, langchain, etc.)
+
+    Set up docker-compose.yml to run Qdrant, Redis, Elasticsearch
+
+Learning exercise:
+→ I will walk you through docker-compose up and help troubleshoot container networking.
+Phase 2: Document Ingestion + Preprocessing
+
+Goals to learn:
+
+    How to extract text from PDF, DOCX, TXT
+
+    What is “chunking” and why it improves retrieval
+
+    How to detect language (langdetect)
+
+Tasks:
+
+    Write Python scripts (file_processor.py)
+
+    Test text extraction on sample docs
+
+Learning exercise:
+→ I’ll explain how semantic splitting works and guide you to implement LangChain text splitters.
+Phase 3: Embedding + Vector Storage
+
+Goals to learn:
+
+    What are embeddings?
+
+    How do we store and query vectors in Qdrant?
+
+Tasks:
+
+    Use sentence-transformers to embed chunks
+
+    Push embeddings + metadata into Qdrant
+
+Learning exercise:
+→ I’ll explain cosine similarity, how Qdrant indexes work, and show you how to query top-N vectors.
+Phase 4: Hybrid Retrieval
+
+Goals to learn:
+
+    What is BM25 and why combine with vectors?
+
+    How to combine Elasticsearch + Qdrant results
+
+Tasks:
+
+    Set up Elasticsearch index
+
+    Write combined retriever logic (embeddings.py)
+
+Learning exercise:
+→ I’ll help you write rank fusion code (e.g., score combination or weighted average).
+Phase 5: Reranking
+
+Goals to learn:
+
+    What is a cross-encoder reranker?
+
+    Why does it improve relevance?
+
+Tasks:
+
+    Use Hugging Face cross-encoders to rerank top-N
+
+    Integrate reranking into the retrieval pipeline
+
+Learning exercise:
+→ I’ll explain pointwise vs pairwise reranking and walk you through a reranker example.
+Phase 6: Caching
+
+Goals to learn:
+
+    Why cache? → speed + cost savings
+
+    How Redis or SQLite works as a cache
+
+Tasks:
+
+    Implement caching for queries + answers (cache.py)
+
+Learning exercise:
+→ I’ll show you how to design cache keys and handle invalidation.
+Phase 7: RAG Prompt + LLM Generation
+
+Goals to learn:
+
+    How to compose prompts with retrieved chunks
+
+    How to call the Groq LLaMA API safely
+
+Tasks:
+
+    Build the prompt in rag_pipeline.py
+
+    Connect to Groq API using requests or httpx
+
+Learning exercise:
+→ I’ll explain prompt engineering + show you how to balance context length.
+Phase 8–13 (Advanced Phases)
+
+We will cover:
+✅ Feedback system → REST endpoints, DB storage
+✅ Chunk relevance → track + send to frontend
+✅ Monitoring → Prometheus + Grafana
+✅ Auth → API keys / OAuth2 (auth.py)
+✅ Async tasks → Celery + Redis (async_tasks.py)
+✅ Autoscaling → Kubernetes YAML, health checks
+📂 Folder Setup Walkthrough
+
+I will help you:
+
+    Design the backend/frontend split
+
+    Write clean FastAPI routes
+
+    Set up Dockerfiles + Compose configs
+
+    Add .env files for secure configs
+
+⚙️ Final Upgrade Features
+
+When we get to the end, I’ll guide you on:
+
+    Admin dashboard
+
+    YouTube transcript indexing
+
+    Voice input with Speech-to-Text APIs
+    
+    
+    
+    
+python app/embeddings.py \
+  --pdf-folder /home/haas/rag_proj/samples/AAPMOR\ Website \
+  --index-path faiss_index.idx \
+  --metadata-path metadata.pkl \
+  --recreate
+
+    
+    

@@ -1,0 +1,7 @@
+fastapi
+uvicorn
+qdrant-client
+elasticsearch
+python-docx
+PyPDF2
+sentence-transformers
