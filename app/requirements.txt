@@ -1,7 +1,9 @@
-fastapi
-uvicorn
-qdrant-client
-elasticsearch
-python-docx
-PyPDF2
+fastapi>=0.68.0
+uvicorn>=0.15.0
+python-multipart
+pymongo>=4.0
+qdrant-client>=1.7.3
 sentence-transformers
+llama-cpp-python
+langchain
+python-dotenv

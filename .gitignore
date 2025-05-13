@@ -17,3 +17,52 @@ env/
 # IDEs
 .vscode/
 .idea/
+
+#Folderswhich are not req
+models/
+samples/
+__pycache__/
+
+
+# Byte-compiled / cache
+__pycache__/
+*.py[cod]
+
+# Virtual environments
+venv/
+
+# Models and large files
+models/
+*.gguf
+*.pth
+*.pt
+*.bin
+*.ckpt
+
+# Logs
+*.log
+
+# Local database
+rag.db
+
+# IDE/editor metadata
+*.vscode/
+*.idea/
+
+# Docker metadata
+qdrant_data/
+docker-data/
+
+# Data samples
+samples/
+data/
+
+# Miscellaneous binary/serialized
+*.pkl
+*.json
+
+# Avoid these files
+document_processor.log
+metadata.json
+metadata.pkl
+RAD PROJ Full Project.txt
