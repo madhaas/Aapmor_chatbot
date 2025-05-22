@@ -564,12 +564,7 @@ class DocumentProcessor:
             result["end_time"] = datetime.now()
             result["duration"] = (result["end_time"] - result["start_time"]).total_seconds()
             
-            # Log overall result
-            if result["success"]:
-                logger.info(f"Processing completed successfully in {result['duration']:.1f} seconds")
-            else:
-                logger.error(f"Processing failed after {result['duration']:.1f} seconds")
-                
+            result["start_time"] = result["start_time"].isoformat()
             return result
 
 
