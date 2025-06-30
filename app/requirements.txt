@@ -1,9 +1,16 @@
-fastapi>=0.68.0
-uvicorn>=0.15.0
-python-multipart
-pymongo>=4.0
-qdrant-client>=1.7.3
+fastapi
+uvicorn
+pydantic-settings
+pymongo
+qdrant-client
 sentence-transformers
-llama-cpp-python
-langchain
+groq
+requests
+beautifulsoup4
+selenium # For web scraping with Selenium
+webdriver-manager # To manage browser drivers for Selenium (useful in Docker too)
+langchain-community
+langchain-core
 python-dotenv
+python-multipart # For handling file uploads in FastAPI
+

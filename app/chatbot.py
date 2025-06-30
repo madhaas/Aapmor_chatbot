@@ -1,471 +1,479 @@
 #!/usr/bin/env python3
-#chatbot.py
-"""
-Enhanced RAG Chatbot with Qdrant Integration and GGUF Model Support
-Features:
-- Advanced prompt engineering with structured context formatting
-- Local GGUF model support via llama-cpp-python
-- SentenceTransformer embeddings for semantic search
-- Qdrant vector database for efficient retrieval
-- Interactive CLI interface with debug mode
-"""
-from pathlib import Path
-from typing import List, Optional, Dict, Any, Tuple
-import logging
 import argparse
-import torch
-import json
+import logging
 import textwrap
-import os
 import time
-from llama_cpp import Llama
-from sentence_transformers import SentenceTransformer
+from typing import List, Dict, Any, Optional, Tuple
+from dotenv import load_dotenv
+from groq import Groq
+import httpx   
 from qdrant_client import QdrantClient
 from qdrant_client.models import VectorParams, Distance
 from qdrant_client.http import models as rest
+from sentence_transformers import SentenceTransformer
+import torch
+from app_config import settings
 
-if torch.cuda.is_available:
-    name=torch.cuda.get_device_name(0)
-    print(name)
-# Configure logging
+load_dotenv()
+
+SYSTEM_PROMPT = """
+You are the Aapmor AI Assistant, a professional, helpful, and friendly conversational AI. Your primary mission is to provide accurate and concise answers based *only* on the information provided in the conversation history and the knowledge base context.
+
+**Directive for Using <CONVERSATION_HISTORY>:**
+You have access to the conversation history. It is CRUCIAL that you actively use this history to:
+1.  Understand the full context of the user's current query and the overall dialogue.
+2.  Recall and refer to specific details mentioned earlier in the conversation, such as the user's name, to provide a personalized experience.
+3.  Maintain conversational coherence and avoid asking for information that the user has already provided.
+
+**Directive for Using <KNOWLEDGE_BASE_CONTEXT>:**
+For substantive questions, you will be provided with <KNOWLEDGE_BASE_CONTEXT>. You must:
+1.  Thoroughly review this context to find relevant facts, figures, and information that directly answer the user's question.
+2.  Base your answer for any substantive question strictly on the information found within this context.
+
+**Core Reasoning and Response Protocol:**
+You must follow this protocol for every query:
+-   **Analyze Intent:** First, determine if the user's query is simple small talk (e.g., 'hi', 'thanks') or a substantive question.
+-   **Handle Small Talk:** If the query is small talk, respond politely and conversationally without relying on the knowledge base.
+-   **Answer Substantive Questions:** If it's a substantive question, synthesize a concise answer based *exclusively* on the information found in the <CONVERSATION_HISTORY> and <KNOWLEDGE_BASE_CONTEXT>.
+
+**Strict Rules of Engagement:**
+-   **Never Invent Answers:** Your answers must be 100% derived from the provided context. Do not, under any circumstances, use external knowledge or make assumptions.
+-   **Handle Lack of Information:** If you cannot find a relevant answer in the provided context, do not apologize. State clearly: "I don't have information on that topic. Can I help with something else?"
+-   **Be Proactive and Polite:** Always maintain a polite tone. After providing an answer, proactively ask if the user requires further assistance.
+"""
+
 logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
-    level=logging.INFO  
+    level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# Advanced system prompt with clear instructions
-SYSTEM_PROMPT = """You are a precise, helpful expert assistant with access to a specialized knowledge base.
-Your goal is to provide factual, accurate information based solely on the context provided.
+logger.info(f"DEBUG: Value of settings.GROQ_API_KEY (first 5 chars): {settings.GROQ_API_KEY.get_secret_value()[:5] + '...' if settings.GROQ_API_KEY.get_secret_value() else 'NOT SET'}")
 
-Guidelines:
-- Answer ONLY from the provided context; do not use outside knowledge
-- If the context doesn't contain the answer, say "I don't have information about that in my knowledge base"
-- Cite specific parts of the context when appropriate using [Source #]
-- Maintain a professional, concise tone
-- Format responses for readability when appropriate
-- Be direct and avoid unnecessary qualifiers or hedging
-- Do not mention the context or retrieval system in your responses unless asked
-"""
-
-# Few-shot examples demonstrating ideal response format
-FEW_SHOT_EXAMPLES = [
-    {
-        "context": [
-            "AAPMOR specializes in enterprise-grade AI solutions with a focus on natural language processing and computer vision. The company was founded in 2018 by Dr. Sarah Chen and has offices in Boston and Singapore.",
-            "AAPMOR's flagship product, DataSense, enables organizations to process unstructured data at scale through a combination of deep learning and symbolic AI approaches."
-        ],
-        "question": "What is AAPMOR?",
-        "answer": "AAPMOR is an enterprise-grade AI solutions company founded in 2018 by Dr. Sarah Chen. It specializes in natural language processing and computer vision, with offices in Boston and Singapore. Their flagship product is DataSense, which processes unstructured data at scale using a combination of deep learning and symbolic AI. [Source 1, 2]"
-    },
-    {
-        "context": [
-            "Document ingestion requires a POST request to the /ingest endpoint with files uploaded as multipart/form-data under the 'files' key.",
-            "The /ingest endpoint supports PDF, DOCX, TXT, and HTML formats. Maximum file size is 50MB.",
-            "After successful ingestion, the API returns a JSON response with document IDs and processing status."
-        ],
-        "question": "How do I upload documents to the system?",
-        "answer": "To upload documents, send a POST request to the /ingest endpoint with your files as multipart/form-data under the 'files' key. The system supports PDF, DOCX, TXT, and HTML formats with a maximum file size of 50MB. Upon successful upload, you'll receive a JSON response containing document IDs and processing status. [Source 1, 2, 3]"
-    }
-]
-
-# Main prompt template with sophisticated context structuring
-PROMPT_TEMPLATE = """<s>[INST] <<SYS>>
-{system_prompt}
-<</SYS>>
-
-{examples}
-
-I'll help you answer the following question based on the retrieved context.
-
-Context information:
-{context}
-
-Question: {question} [/INST]"""
-
-# Context formatting function
-def format_context(contexts: List[str]) -> str:
-    """Format retrieved context chunks with source indicators"""
-    formatted = []
-    for i, ctx in enumerate(contexts, 1):
-        # Trim long contexts to a reasonable length
-        if len(ctx) > 1500:
-            ctx = ctx[:1500] + "..."
-        formatted.append(f"[Source {i}]: {ctx}")
-    return "\n\n".join(formatted)
-
-# Examples formatting function
-def format_examples(use_examples: bool = True) -> str:
-    """Format few-shot examples for the prompt"""
-    if not use_examples:
-        return ""
-        
-    examples_text = "Here are examples of how to answer questions based on context:"
-    
-    for ex in FEW_SHOT_EXAMPLES:
-        examples_text += "\n\nContext information:\n"
-        examples_text += format_context(ex["context"])
-        examples_text += f"\n\nQuestion: {ex['question']}\n"
-        examples_text += f"Answer: {ex['answer']}"
-    
-    examples_text += "\n\n"
-    return examples_text
-
+def _approx_num_tokens(text: str) -> int:
+    """Approximate token count for text using word count + char_count / 4 heuristic."""
+    return len(text.split()) + len(text) // 4
 
 class RAGChatbot:
     def __init__(
         self,
-        qdrant_host: str = "localhost",
-        qdrant_port: int = 6333,
-        collection: str = "documents",
-        model_path: str = "/home/haas/rag_proj/models/mistral-7b-instruct-v0.1.Q4_K_M.gguf",
-        embedding_model: str = "all-MiniLM-L6-v2",
-        n_threads: int = 8
+        qdrant_host: str = settings.QDRANT_HOST,
+        qdrant_port: int = settings.QDRANT_PORT,
+        collection: str = settings.QDRANT_COLLECTION,
+        embedding_model: str = settings.EMBEDDING_MODEL,
+        score_threshold: float = 0.25
     ):
-        """
-        Initialize RAG Chatbot components
-        """
-        # Verify the model path exists
-        if not os.path.exists(model_path):
-            raise FileNotFoundError(f"Model file not found: {model_path}")
-            
-        # Initialize embedding model
-        logger.info(f"Loading embedding model: {embedding_model}")
-        self.encoder = SentenceTransformer(embedding_model, device="cuda")
+        self.encoder = SentenceTransformer(
+            embedding_model,
+            device="cuda" if torch.cuda.is_available() else "cpu"
+        )
         
-        # Initialize Qdrant client and ensure collection
-        self.qdrant = self._init_qdrant(qdrant_host, qdrant_port, collection)
-        self.collection = collection
-        
-        # Initialize LLM - using llama-cpp-python for GGUF model
-        logger.info(f"Loading GGUF model: {model_path}")
-        self.llm = self._init_llm(model_path, n_threads)
+        self.qdrant_main_collection = collection  
+        self.qdrant_chat_collection = settings.QDRANT_CHAT_HISTORY_COLLECTION  
+        self.score_threshold = score_threshold
 
-    def _init_qdrant(self, host: str, port: int, collection: str) -> QdrantClient:
-        """Initialize and verify Qdrant connection and collection"""
-        logger.info(f"Connecting to Qdrant at {host}:{port}")
-        client = QdrantClient(host=host, port=port)
-        
-        try:
-            # Check if collection exists by fetching info
-            client.get_collection(collection_name=collection)
-            logger.info(f"Found existing collection: {collection}")
-        except Exception:
-            # Create collection with embedding dim & cosine distance
-            dim = self.encoder.get_sentence_embedding_dimension()
-            logger.info(f"Creating Qdrant collection '{collection}' with dimension {dim}")
-            
-            client.create_collection(
-                collection_name=collection,
-                vectors_config=VectorParams(size=dim, distance=Distance.COSINE),
-                optimizers_config=rest.OptimizersConfigDiff(
-                    indexing_threshold=20_000,
-                    memmap_threshold=100_000
-                )
-            )
-        client = QdrantClient(host=host, port=port, prefer_grpc=True)
-        logger.info(f"Connected to Qdrant collection: {collection}")
-        # Ensure collection is ready
-        
+        httpx_client_without_proxies = httpx.Client(
+        )
+
+        self.llm_client = Groq(
+            api_key=settings.GROQ_API_KEY.get_secret_value(),
+            # Pass the pre-configured httpx client to Groq
+            http_client=httpx_client_without_proxies 
+        )
+        self.llm_model = settings.GROQ_MODEL_NAME
+
+        self.qdrant = self._init_qdrant_client(qdrant_host, qdrant_port)
+        self._ensure_document_collection(self.qdrant_main_collection)
+        self._ensure_chat_history_collection(self.qdrant_chat_collection)
+
+    def _init_qdrant_client(self, host: str, port: int) -> QdrantClient:
+        """Initialize Qdrant client"""
+        client = QdrantClient(url=f"http://{host}:{port}", prefer_grpc=False)
+        logger.info(f"Qdrant client initialized, connected to http://{host}:{port}")
         return client
 
-    def _init_llm(self, model_path: str, n_threads: int) -> Any:
-        """Initialize LLM using llama-cpp-python for GGUF model"""
+    def _ensure_document_collection(self, collection_name: str):
+        """Ensure the main document collection exists"""
         try:
-            # Configure model parameters
-            llm = Llama(
-                model_path=model_path,
-                n_ctx=4096,  # Context window size
-                n_threads=n_threads,  # CPU threads
-                use_gpu=True,  # Use GPU
-                n_gpu_layers=40,  # Number of GPU layers
-                low_vram=True,  # Low RAM mode
-                verbose=False
-
+            self.qdrant.get_collection(collection_name)
+            logger.info(f"Connected to existing document collection: {collection_name}")
+        except Exception:
+            logger.info(f"Creating new document collection: {collection_name}")
+            dim = self.encoder.get_sentence_embedding_dimension()
+            
+            self.qdrant.create_collection(
+                collection_name=collection_name,
+                vectors_config=VectorParams(
+                    size=dim,
+                    distance=Distance.COSINE
+                )
             )
             
-            logger.info(f"Successfully loaded model {model_path}")
-            return llm
-            
-        except Exception as e:
-            logger.error(f"Failed to load LLM: {str(e)}")
-            raise
+            try:
+                self.qdrant.create_payload_index(
+                    collection_name=collection_name,
+                    field_name="text",
+                    field_schema=rest.PayloadSchemaType.TEXT
+                )
+                self.qdrant.create_payload_index(
+                    collection_name=collection_name,
+                    field_name="source",
+                    field_schema=rest.PayloadSchemaType.KEYWORD
+                )
+                logger.info(f"Created payload indexes for document collection '{collection_name}'")
+            except Exception as e:
+                logger.warning(f"Could not create payload indexes for '{collection_name}': {e}")
 
-    
-    def generate_response(
+    def _ensure_chat_history_collection(self, collection_name: str):
+        """Ensure the chat history Qdrant collection exists"""
+        try:
+            self.qdrant.get_collection(collection_name)
+            logger.info(f"Connected to existing chat history collection: {collection_name}")
+        except Exception:
+            logger.info(f"Creating new chat history collection: {collection_name}")
+            dim = self.encoder.get_sentence_embedding_dimension()
+            
+            self.qdrant.create_collection(
+                collection_name=collection_name,
+                vectors_config=VectorParams(
+                    size=dim,
+                    distance=Distance.COSINE
+                )
+            )
+            
+            try:
+                self.qdrant.create_payload_index(
+                    collection_name=collection_name,
+                    field_name="session_id",
+                    field_schema=rest.PayloadSchemaType.KEYWORD
+                )
+                self.qdrant.create_payload_index(
+                    collection_name=collection_name,
+                    field_name="timestamp_iso",
+                    field_schema=rest.PayloadSchemaType.KEYWORD
+                )
+                self.qdrant.create_payload_index(
+                    collection_name=collection_name,
+                    field_name="user_query_preview",
+                    field_schema=rest.PayloadSchemaType.TEXT
+                )
+                logger.info(f"Created payload indexes for chat history collection '{collection_name}'")
+            except Exception as e:
+                logger.warning(f"Could not create payload indexes for chat history collection '{collection_name}': {e}")
+
+    def _trim_history_by_tokens(
         self,
-        question: str,
-        contexts: List[Dict[str, Any]],
-        max_tokens: int = 512,
-        temperature: float = 0.1,
-        use_examples: bool = True
-    ) -> str:
-        """Generate answer using retrieved context with llama-cpp"""
-        try:
-            # Extract just the text for the prompt
-            context_texts = [ctx["text"] for ctx in contexts]
-            formatted_context = format_context(context_texts)
-            
-            # Prepare the prompt with optional examples
-            examples_section = format_examples(use_examples)
-            
-            prompt = PROMPT_TEMPLATE.format(
-                system_prompt=SYSTEM_PROMPT,
-                examples=examples_section,
-                context=formatted_context,
-                question=question
-            )
-            
-            logger.info(f"Generating response with {len(contexts)} context chunks")
-            
-            # Generate response using llama-cpp
-            result = self.llm(
-                prompt,
-                max_tokens=max_tokens,
-                temperature=temperature,
-                stop=["</s>", "[INST]", "<s>"],
-                echo=False  # Don't include the prompt in the output
-            )
-            
-            # Extract the generated text
-            if isinstance(result, dict) and "choices" in result:
-                response_text = result["choices"][0]["text"].strip()
+        history: List[Tuple[Optional[str], str]],
+        max_tokens: int
+    ) -> List[Tuple[Optional[str], str]]:
+        """
+        Trims the conversation history from the oldest entries to fit within
+        the specified maximum token limit.
+        Each turn (user + bot message) counts towards the token limit.
+        """
+        if not history or max_tokens <= 0:
+            return []
+        trimmed_history = []
+        current_tokens = 0
+        for user_msg, bot_msg in reversed(history):
+            turn_tokens = 0
+            if user_msg is not None:
+                turn_tokens += _approx_num_tokens(user_msg)
+            if bot_msg is not None:
+                turn_tokens += _approx_num_tokens(bot_msg)
+            if current_tokens + turn_tokens <= max_tokens:
+                trimmed_history.insert(0, (user_msg, bot_msg))
+                current_tokens += turn_tokens
             else:
-                response_text = result.strip()
-            
-            return response_text
+                break
+        logger.debug(f"History trimmed from {len(history)} to {len(trimmed_history)} turns, totaling approx {current_tokens} tokens.")
+        return trimmed_history
+
+    def _retrieve_chat_history_context(
+        self,
+        query_text: str,
+        session_id: str,
+        top_n_turns: int = 3
+    ) -> List[str]:
+        """
+        Retrieves semantically relevant past chat interactions from Qdrant
+        for the current session, up to a configured token limit.
+        """
+        if not query_text.strip():
+            return []
+        retrieved_history_texts = []
+        current_tokens = 0
+        try:
+            query_vector = self.encoder.encode(query_text).tolist()
+            search_results = self.qdrant.search(
+                collection_name=self.qdrant_chat_collection,
+                query_vector=query_vector,
+                limit=top_n_turns,
+                with_payload=True,
+                query_filter=rest.Filter(
+                    must=[
+                        rest.FieldCondition(
+                            key="session_id",
+                            match=rest.MatchValue(value=session_id)
+                        )
+                    ]
+                ),
+            )
+            for hit in search_results:
+                past_turn_text = hit.payload.get("full_interaction_text")
+                if past_turn_text:
+                    turn_tokens = _approx_num_tokens(past_turn_text)
+                    if current_tokens + turn_tokens <= settings.MAX_RETRIEVED_CHAT_TOKENS:
+                        retrieved_history_texts.append(past_turn_text)
+                        current_tokens += turn_tokens
+                    else:
+                        break
+            logger.debug(f"Retrieved {len(retrieved_history_texts)} semantically relevant chat turns (approx {current_tokens} tokens) for session {session_id}.")
+            return retrieved_history_texts
         except Exception as e:
-            logger.error("Generation error: %s", str(e))
-            return "Error generating response."
+            logger.error(f"Error retrieving chat history context for session {session_id}: {e}", exc_info=True)
+            return []
 
     def query(
         self,
         question: str,
+        session_id: str,
+        history: Optional[List[Tuple[Optional[str], str]]] = None,
         top_k: int = 5,
-        max_tokens: int = 512,
         temperature: float = 0.1,
-        use_examples: bool = True
+        max_tokens: int = 512,
+        score_threshold: Optional[float] = None
     ) -> Dict[str, Any]:
-        """Complete RAG pipeline with guaranteed metadata"""
-        base_metadata = {
-            "question": question,
-            "top_k": top_k,
-            "temperature": temperature
-        }
-        
+        """Full RAG pipeline execution with conversational memory"""
         if not question.strip():
-            return {
-                "answer": "Please provide a valid question.",
-                "contexts": [],
-                "metadata": base_metadata
-            }
-                
-        contexts = self.retrieve_context(question, top_k)
+            return {"answer": "Please provide a valid question.", "contexts": []}
+
+        score_threshold = score_threshold or self.score_threshold
         
-        if not contexts:
-            return {
-                "answer": "I don't have information about that in my knowledge base.",
-                "contexts": [],
-                "metadata": base_metadata
-            }
-                
-        answer = self.generate_response(
-            question, 
-            contexts, 
-            max_tokens, 
-            temperature,
-            use_examples
+        contexts = self.retrieve_context(question, top_k, score_threshold)
+        
+        recent_history_summary = ""
+        if history:
+            temp_summary_tokens = 0
+            for user_msg, bot_msg in reversed(history[-settings.MAX_CHAT_HISTORY:]):
+                turn_text = ""
+                if user_msg is not None: turn_text += user_msg + " "
+                if bot_msg is not None: turn_text += bot_msg + " "
+                if temp_summary_tokens + _approx_num_tokens(turn_text) <= 300:
+                    recent_history_summary = turn_text + recent_history_summary
+                    temp_summary_tokens += _approx_num_tokens(turn_text)
+                else:
+                    break
+        combined_retrieval_query_text = f"{recent_history_summary.strip()} {question}" if recent_history_summary else question
+        
+        retrieved_chat_history_contexts = self._retrieve_chat_history_context(
+            query_text=combined_retrieval_query_text,
+            session_id=session_id,
+            top_n_turns=settings.MAX_CHAT_HISTORY
         )
+        
+        answer = self.generate_response(
+            question=question,
+            contexts=contexts,
+            history=history,
+            retrieved_chat_history_contexts=retrieved_chat_history_contexts,
+            temperature=temperature,
+            max_tokens=max_tokens
+        ) if contexts else "I couldn't find a specific answer for that in my knowledge base. Please try rephrasing your question or ask a different one."
         
         return {
             "answer": answer,
             "contexts": contexts,
-            "metadata": base_metadata
+            "metadata": {
+                "question": question,
+                "top_k": top_k,
+                "temperature": temperature,
+                "score_threshold": score_threshold,
+                "max_tokens": max_tokens,
+                "retrieved_chat_history_count": len(retrieved_chat_history_contexts)
+            }
         }
 
     def retrieve_context(
         self,
         question: str,
-        top_k: int = 5,
-        score_threshold: float = 0.4  # Increased recall
+        top_k: int,
+        score_threshold: Optional[float]
     ) -> List[Dict[str, Any]]:
-        """Retrieve context with optimized search parameters"""
-        try:
-            query_vector = self.encoder.encode(question).tolist()
-            
-            results = self.qdrant.search(
-                collection_name=self.collection,
-                query_vector=query_vector,
-                limit=top_k,
-                score_threshold=score_threshold,
-                search_params=rest.SearchParams(
-                    hnsw_ef=128,  # Better search accuracy
-                    exact=False
-                ),
-                with_payload=True
-            )
-            
-            contexts = []
-            for hit in results:
-                text = hit.payload.get("text", "")
-                contexts.append({
-                    "text": text,
-                    "score": hit.score,
-                    "metadata": {
-                        k: v for k, v in hit.payload.items()
-                        if k != "text"
-                    }
-                })
-                
-            return contexts
-            
-        except Exception as e:
-            logger.error("Retrieval failed: %s", e)
-            return []
-
-
-# Interactive mode function - moved out of the class to be a module-level function
-def interactive_mode(bot: RAGChatbot):
-    """Run the chatbot in interactive mode"""
-    logger.info("RAG Chatbot Ready (Ctrl+C to exit)")
-    print("\n" + "="*50)
-    print("RAG Chatbot Interactive Mode")
-    print("="*50)
-    print("Type 'exit' or 'quit' to end the session")
-    print("Type 'debug on' to enable detailed context display")
-    print("Type 'debug off' to disable detailed context display")
-    print("Type 'settings' to view current settings")
-    print("="*50 + "\n")
+        """Configurable similarity search from main document collection"""
+        query_vector = self.encoder.encode(question).tolist()
         
-    debug_mode = False
-    top_k = 5
-    temperature = 0.1
-    use_examples = True
+        results = self.qdrant.search(
+            collection_name=self.qdrant_main_collection,  
+            query_vector=query_vector,
+            limit=top_k,
+            score_threshold=score_threshold,
+            with_payload=True
+        )
+
+        return [
+            {
+                "text": hit.payload["text"],
+                "score": hit.score,
+                "metadata": {k: v for k, v in hit.payload.items() if k != "text"}
+            }
+            for hit in results if "text" in hit.payload
+        ]
+
+    def generate_response(
+        self,
+        question: str,
+        contexts: List[Dict],
+        history: Optional[List[Tuple[Optional[str], str]]] = None,
+        retrieved_chat_history_contexts: Optional[List[str]] = None,
+        temperature: float = 0.1,
+        max_tokens: int = 512
+    ) -> str:
+        """LLM response generation with conversational memory support"""
+        context_text = "\n".join(f"- {ctx['text']}" for ctx in contexts)
         
+        messages = []
+        messages.append({"role": "system", "content": SYSTEM_PROMPT})
+        
+        if history:
+            trimmed_recent_history = self._trim_history_by_tokens(history, settings.MAX_HISTORY_TOKENS)
+            for user_msg, bot_msg in trimmed_recent_history:
+                if user_msg is not None:
+                    messages.append({"role": "user", "content": user_msg})
+                if bot_msg is not None:
+                    messages.append({"role": "assistant", "content": bot_msg})
+        
+        if retrieved_chat_history_contexts:
+            retrieved_chat_str = "\n".join(retrieved_chat_history_contexts)
+            messages.append({"role": "user", "content": f"Here is some relevant past conversation for additional context:\n{retrieved_chat_str}"})
+        
+        if context_text:
+            messages.append({"role": "user", "content": f"Here is some relevant document information:\n{context_text}"})
+        
+        messages.append({"role": "user", "content": question})
+        
+        response = self.llm_client.chat.completions.create(
+            messages=messages,
+            model=self.llm_model,
+            temperature=temperature,
+            max_tokens=max_tokens
+        )
+        return response.choices[0].message.content.strip()
+
+def interactive_mode(bot: RAGChatbot, initial_params: Dict[str, Any], initial_debug: bool = False):
+    """Enhanced CLI interface with parameter control"""
+    debug_mode = initial_debug
+    params = initial_params.copy()
+
+    print("\n== RAG Chatbot ==")
+    print("Commands: debug, params, set <param> <value>, exit")
+    print("Available parameters: top_k, temperature, score_threshold, max_tokens\n")
+
     while True:
         try:
-            question = input("\nQuestion: ").strip()
+            query = input("\nQuestion: ").strip()
             
-            if question.lower() in {"exit", "quit"}:
+            if not query:
+                continue
+            if query.lower() in ("exit", "quit"):
                 break
-            elif question.lower() == "debug on":
-                debug_mode = True
-                print("✓ Debug mode enabled - will show retrieved context")
+            elif query.lower() == "debug":
+                debug_mode = not debug_mode
+                print(f"Debug mode {'ON' if debug_mode else 'OFF'}")
                 continue
-            elif question.lower() == "debug off":
-                debug_mode = False
-                print("✓ Debug mode disabled")
+            elif query.lower() == "params":
+                print("\nCurrent Parameters:")
+                for k, v in params.items():
+                    print(f"  {k}: {v}")
                 continue
-            elif question.lower() == "settings":
-                print("\nCurrent Settings:")
-                print(f"- Debug Mode: {debug_mode}")
-                print(f"- Retrieved Contexts: {top_k}")
-                print(f"- Temperature: {temperature}")
-                print(f"- Use Examples: {use_examples}")
-                continue
-            elif question.lower().startswith("set "):
-                # Handle settings changes
-                parts = question.lower().split()
-                if len(parts) >= 3:
-                    setting, value = parts[1], parts[2]
-                    if setting == "top_k" and value.isdigit():
-                        top_k = int(value)
-                        print(f"✓ Set top_k to {top_k}")
-                    elif setting == "temp" and value.replace(".", "", 1).isdigit():
-                        temperature = float(value)
-                        print(f"✓ Set temperature to {temperature}")
-                    elif setting == "examples" and value in ["on", "off"]:
-                        use_examples = (value == "on")
-                        print(f"✓ Set examples to {use_examples}")
+            elif query.startswith("set "):
+                try:
+                    parts = query.split()
+                    if len(parts) != 3:
+                        print("Usage: set <parameter> <value>")
+                        continue
+                    _, param, value = parts
+                    param = param.lower()
+                    if param in params:
+                        if param in ['temperature', 'score_threshold']:
+                            params[param] = float(value)
+                        else:
+                            params[param] = int(value)
+                        print(f"Set {param} to {value}")
                     else:
-                        print("Invalid setting. Available settings: top_k, temp, examples")
-                else:
-                    print("Usage: set [setting] [value]")
-                continue
-                
-            # Process the actual query
-            if not question:
+                        print(f"Invalid parameter. Valid options: {list(params.keys())}")
+                except Exception as e:
+                    print(f"Error setting parameter: {e}")
                 continue
 
-            start = time.time()
+            start_time = time.time()
+            session_id = "cli_session"
             result = bot.query(
-                question,
-                top_k=top_k,
-                temperature=temperature,
-                use_examples=use_examples
+                question=query,
+                session_id=session_id,
+                history=None,
+                top_k=params['top_k'],
+                temperature=params['temperature'],
+                score_threshold=params['score_threshold'],
+                max_tokens=params['max_tokens']
             )
-            elapsed = time.time() - start
-            print(f"\n⏱ Query took {elapsed:.2f} seconds\n")
- 
+            elapsed = time.time() - start_time
 
-                
+            if debug_mode:
+                print(f"\n[Debug] Retrieved {len(result['contexts'])} contexts (Threshold: {params['score_threshold']})")
+                print(f"[Debug] Retrieved {result['metadata']['retrieved_chat_history_count']} chat history contexts")
+                for i, ctx in enumerate(result['contexts'], 1):
+                    print(f"\nContext {i} - Score: {ctx['score']:.4f}")
+                    print(textwrap.shorten(ctx['text'], width=300, placeholder="..."))
+                    if ctx['metadata']:
+                        print(f"Metadata: {ctx['metadata']}")
+                    print("-" * 50)
 
-            result = bot.query(
-                question, 
-                top_k=top_k, 
-                temperature=temperature,
-                use_examples=use_examples
-            )
-            
-            # For debug mode, show retrieved context first
-            if debug_mode and result["contexts"]:
-                print("\n" + "="*50)
-                print("RETRIEVED CONTEXT")
-                print("="*50)
-                for i, ctx in enumerate(result["contexts"], 1):
-                    score = ctx["score"]
-                    text = ctx["text"]
-                    # Truncate and format text for display
-                    preview = textwrap.shorten(text, width=300, placeholder="...")
-                    print(f"\n[Source {i}] (Score: {score:.4f}):\n{preview}")
-                print("\n" + "="*50 + "\n")
-            
-            # Display the answer
-            print("\nAnswer:")
-            print(result["answer"])
-            
+            print(f"\nAnswer ({elapsed:.2f}s):")
+            print(textwrap.fill(result['answer'], width=100))
+
         except KeyboardInterrupt:
-            print("\nExiting interactive mode...")
+            print("\nExiting...")
             break
         except Exception as e:
-            logger.error(f"Error in interactive mode: {e}")
-            print(f"Error: {str(e)}")
-
+            logger.error(f"Error processing query: {e}")
+            print(f"Error: {e}")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Enhanced RAG Chatbot")
-    parser.add_argument("--qdrant-host", default="localhost", help="Qdrant server host")
-    parser.add_argument("--qdrant-port", type=int, default=6333, help="Qdrant server port")
-    parser.add_argument("--collection", default="documents", help="Qdrant collection name")
-    parser.add_argument("--model", default="/home/haas/rag_proj/models/mistral-7b-instruct-v0.1.Q4_K_M.gguf", 
-                       help="Path to GGUF model file")
-    parser.add_argument("--embedding-model", default="all-MiniLM-L6-v2", 
-                       help="SentenceTransformer model to use for embeddings")
-    parser.add_argument("--threads", type=int, default=8, help="Number of CPU threads for processing")
-    parser.add_argument("--no-examples", action="store_true", help="Disable few-shot examples in prompts")
-    parser.add_argument("--top-k", type=int, default=5, help="Number of context chunks to retrieve")
-    parser.add_argument("--temperature", type=float, default=0.1, help="Sampling temperature for generation")
-    parser.add_argument("--debug", action="store_true", help="Start in debug mode")
-    
+    parser = argparse.ArgumentParser(description="RAG Chatbot")
+    parser.add_argument("--qdrant-host", default=settings.QDRANT_HOST)
+    parser.add_argument("--qdrant-port", type=int, default=settings.QDRANT_PORT)
+    parser.add_argument("--collection", default=settings.QDRANT_COLLECTION)
+    parser.add_argument("--embedding-model", default=settings.EMBEDDING_MODEL)
+    parser.add_argument("--temperature", type=float, default=0.1)
+    parser.add_argument("--max-tokens", type=int, default=512)
+    parser.add_argument("--top-k", type=int, default=5)
+    parser.add_argument("--score-threshold", type=float)
+    parser.add_argument("--debug", action="store_true")
+
     args = parser.parse_args()
-    
+
     try:
-        print("\nInitializing RAG Chatbot...")
-        print(f"- Model: {args.model}")
-        print(f"- Embedding: {args.embedding_model}")
-        print(f"- Qdrant: {args.qdrant_host}:{args.qdrant_port}/{args.collection}")
-        
         bot = RAGChatbot(
             qdrant_host=args.qdrant_host,
             qdrant_port=args.qdrant_port,
             collection=args.collection,
-            model_path=args.model,
             embedding_model=args.embedding_model,
-            n_threads=args.threads
+            score_threshold=args.score_threshold or 0.4
         )
         
-        interactive_mode(bot)
+        initial_params = {
+            'top_k': args.top_k,
+            'temperature': args.temperature,
+            'score_threshold': args.score_threshold or bot.score_threshold,
+            'max_tokens': args.max_tokens
+        }
         
+        interactive_mode(
+            bot,
+            initial_params=initial_params,
+            initial_debug=args.debug
+        )
     except Exception as e:
-        logger.critical("Initialization failed: %s", str(e))
+        logger.critical(f"Initialization failed: {str(e)}")
         exit(1)

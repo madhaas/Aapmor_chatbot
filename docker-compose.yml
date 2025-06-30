@@ -1,35 +1,53 @@
-version: '3.8'
+version: '3.8' # Retaining for compatibility, though modern Docker Compose can ignore it.
 
 services:
   backend:
-    build: ./app
+    build: 
+      context: . # Build context is the project root (where Dockerfile is located)
+      dockerfile: Dockerfile # Specifies the Dockerfile to use
     ports:
-      - "8000:8000"
+      - "8000:8000" # Maps host port 8000 to container port 8000 for FastAPI access
     depends_on:
       - qdrant
-      - redis
-      - elasticsearch
+      - mongo # Backend service depends on Qdrant and MongoDB
+    environment: # Environment variables passed into the backend container
+      # Load all variables from the .env file (Docker Compose handles this automatically for top-level env vars)
+      # Explicitly setting them here ensures they are passed to the container's environment.
+      - GROQ_API_KEY=${GROQ_API_KEY}
+      - GROQ_MODEL_NAME=${GROQ_MODEL_NAME}
+      # This flag tells app_config to use Docker service names for DB/Qdrant connections
+      - USE_DOCKER_HOSTNAMES=true 
+      # Override Qdrant and MongoDB hosts to use their service names for internal Docker networking
+      - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6333
+      - QDRANT_COLLECTION=${QDRANT_COLLECTION}
+      - MONGODB_URL=mongodb://mongo:27017
+      - DB_NAME=${DB_NAME}
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL}
+      - MODEL_PATH=${MODEL_PATH}
+      - THREADS=${THREADS}
+    volumes:
+      - .:/app # Mounts your entire project directory into the container for code access
+    restart: unless-stopped # Automatically restart if the container crashes
 
   qdrant:
-    image: qdrant/qdrant:v1.7.3
+    image: qdrant/qdrant:v1.7.3 # Specific version for stability
     ports:
-      - "6333:6333"
-      - "6334:6334"
+      - "6333:6333" # Expose Qdrant HTTP API to host
+      - "6334:6334" # Expose Qdrant gRPC API to host
     volumes:
-      - ./qdrant_data:/qdrant/storage
+      - qdrant_data:/qdrant/storage # Persistent storage for Qdrant data
     restart: unless-stopped
-  redis:
-    image: redis:latest
-    ports:
-      - "6379:6379"
 
-  elasticsearch:
-    image: elasticsearch:7.17.10
-    environment:
-      - discovery.type=single-node
-      - ES_JAVA_OPTS=-Xms1g -Xmx1g
+  mongo: # MongoDB service
+    image: mongo:latest # Latest stable MongoDB image
     ports:
-      - "9200:9200"
+      - "27017:27017" # Expose MongoDB port to host
+    volumes:
+      - mongo_data:/data/db # Persistent storage for MongoDB data
+    restart: unless-stopped
 
+# Define named volumes for persistent data storage
 volumes:
-  es_data:
+  qdrant_data:
+  mongo_data:

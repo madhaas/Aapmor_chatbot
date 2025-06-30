@@ -1,80 +1,105 @@
-from fastapi import APIRouter, UploadFile, File, HTTPException, BackgroundTasks, logger
-from app.database import get_db
-from app.processor import process_document
-from datetime import datetime
+from fastapi import APIRouter, UploadFile, File, HTTPException, status, BackgroundTasks
+from datetime import datetime, timezone
 import uuid
 import os
+import logging
+import asyncio
+from functools import partial
+import shutil
+from typing import List, Optional, Dict, Any
+from app.api_server import processor_instance
+from app_config import settings
 
+logger = logging.getLogger("documents_router")
 router = APIRouter()
 
-@router.post("/upload")
-async def upload_document(
-    background_tasks: BackgroundTasks,
-    file: UploadFile = File(...)
-):
-    db = get_db()
-    
+async def process_document_with_error_handling(temp_dir: str, doc_id: str):
     try:
-        # Generate document ID and metadata
-        doc_id = str(uuid.uuid4())
-        doc_data = {
-            "_id": doc_id,
-            "filename": file.filename,
-            "content_type": file.content_type,
-            "upload_date": datetime.utcnow(),
-            "status": "processing"
-        }
-
-        # Save initial metadata to MongoDB
-        db.documents.insert_one(doc_data)
+        logger.info(f"Background processing started for document {doc_id} in {temp_dir}")
+        processing_result = await asyncio.get_event_loop().run_in_executor(
+            None, 
+            partial(processor_instance.process_document_folder, folder=temp_dir, recreate=False)
+        )
         
-        # Create temp directory if needed
-        file_path = f"temp/{doc_id}_{file.filename}"
-        os.makedirs(os.path.dirname(file_path), exist_ok=True)
-
-        # Async file write
-        with open(file_path, "wb") as buffer:
-            content = await file.read()
-            buffer.write(content)
-
-        # Add background processing task
-        background_tasks.add_task(
-            process_document_with_error_handling,
-            file_path,
-            doc_id,
-            db
-        )
-
-        return {"id": doc_id, "status": "processing"}
-    
-    except Exception as e:
-        # Cleanup partially uploaded file if it exists
-        if 'file_path' in locals() and os.path.exists(file_path):
-            os.remove(file_path)
+        if processing_result["success"]:
+            logger.info(f"Successfully processed document {doc_id}.")
+        else:
+            raise Exception(f"Processing failed for {doc_id}: {processing_result.get('errors', ['Unknown processing error'])}")
             
-        raise HTTPException(500, f"Upload failed: {str(e)}")
-
-def process_document_with_error_handling(file_path: str, doc_id: str, db):
-    """Wrapper function to handle processing errors"""
-    try:
-        process_document(file_path, doc_id)
-        db.documents.update_one(
-            {"_id": doc_id},
-            {"$set": {"status": "completed"}}
-        )
     except Exception as e:
-        db.documents.update_one(
+        logger.error(f"Processing failed for document {doc_id}: {str(e)}", exc_info=True)
+        processor_instance.docs_collection.update_one(
             {"_id": doc_id},
             {"$set": {
                 "status": "failed",
-                "error": str(e)
+                "error": str(e),
+                "updated_at": datetime.now(timezone.utc)
             }}
         )
-        logger.error(f"Processing failed for {doc_id}: {str(e)}")
     finally:
-        # Cleanup temporary file
-        if os.path.exists(file_path):
-            try:
-                os.remove(file_path)
-            except OSError as e:
-                logger.error(f"Failed to cleanup {file_path}: {str(e)}")
+        try:
+            if os.path.exists(temp_dir):
+                shutil.rmtree(temp_dir)
+                logger.info(f"Cleaned up temporary directory: {temp_dir}")
+        except OSError as clean_e:
+            logger.error(f"Failed to cleanup temp directory {temp_dir}: {clean_e}", exc_info=True)
+
+@router.post("/upload", response_model=Dict[str, Any], status_code=status.HTTP_202_ACCEPTED, tags=["Document Management"])
+async def upload_document(
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(..., description="Document file to upload (PDF, DOCX, TXT).")
+):
+    
+    if not file.filename:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="File must have a valid name.")
+    
+    doc_id = str(uuid.uuid4())
+    temp_dir = os.path.join("temp_uploads", doc_id)
+    file_path = os.path.join(temp_dir, file.filename)
+    
+    try:
+        os.makedirs(temp_dir, exist_ok=True)
+        
+        processor_instance.docs_collection.insert_one({
+            "_id": doc_id,
+            "filename": file.filename,
+            "content_type": file.content_type,
+            "upload_date": datetime.now(timezone.utc),
+            "status": "uploading"
+        })
+        
+        with open(file_path, "wb") as buffer:
+            content = await file.read()
+            buffer.write(content)
+        
+        logger.info(f"File '{file.filename}' saved temporarily to: {file_path}")
+        
+        background_tasks.add_task(process_document_with_error_handling, temp_dir, doc_id)
+        
+        return {
+            "id": doc_id,
+            "status": "processing",
+            "message": f"Document '{file.filename}' accepted for background processing. Check logs for details."
+        }
+        
+    except Exception as e:
+        logger.error(f"Upload endpoint failed for '{file.filename}': {str(e)}", exc_info=True)
+        
+        try:
+            if os.path.exists(temp_dir):
+                shutil.rmtree(temp_dir)
+                logger.info(f"Cleaned up temp directory {temp_dir} due to upload error.")
+        except OSError as clean_e:
+            logger.error(f"Failed to cleanup temp directory {temp_dir}: {clean_e}", exc_info=True)
+        
+        processor_instance.docs_collection.update_one(
+            {"_id": doc_id},
+            {"$set": {
+                "status": "upload_failed",
+                "error": str(e),
+                "updated_at": datetime.now(timezone.utc)
+            }}
+        )
+        
+        detail_message = f"Upload failed: {str(e)}" if settings.DEBUG else "Upload failed due to an internal server error."
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=detail_message)

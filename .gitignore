@@ -1,35 +1,21 @@
-# Python
+
 __pycache__/
 *.py[cod]
 *.egg-info/
 *.env
 .env
-
-# Virtual env
 venv/
-env/
-
-# Uploads and models
 /data/uploads/*
 !/data/uploads/.gitkeep
 /models/*
-
-# IDEs
+/uploaded_documents/*
 .vscode/
 .idea/
-
-#Folderswhich are not req
-models/
 samples/
 __pycache__/
-
-
-# Byte-compiled / cache
+uploaded_documents/
 __pycache__/
 *.py[cod]
-
-# Virtual environments
-venv/
 
 # Models and large files
 models/
@@ -66,3 +52,37 @@ document_processor.log
 metadata.json
 metadata.pkl
 RAD PROJ Full Project.txt
+
+
+
+
+
+
+
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual Environments
+venv/
+.venv/
+env/
+.env
+
+# IDE and Editor Folders
+.vscode/
+.idea/
+
+# Local Data, Uploads, and Logs
+data/
+uploaded_documents/
+journals/
+*.log
+
+# Compiled Libraries (if any)
+llama_cpp_python/
+
+# OS-specific files
+.DS_Store
